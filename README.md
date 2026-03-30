@@ -6,3 +6,4 @@ let some AIs generate basic trading games where:
 - Multi Location
 - Multi Goods
 - Load and Save Game
+- very simple AI Players build in
