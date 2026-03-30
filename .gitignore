@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Save game files
+m365_space_ai_001
+m365_space_001
+.save
