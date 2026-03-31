@@ -25,6 +25,10 @@ A turn-based space trading simulation with support for multiple players, locatio
 - **Adaptive Behavior**: AI considers price history, market trends, and position wealth
 - **Randomness**: Small randomization ensures varied behavior and interesting gameplay
 
+### Space Hazards & Events
+- **SpacePirates**: Random pirate attacks when arriving at new locations. 10% chance of attack; pirates steal 50% of your cargo. Plan your routes carefully!
+- **SunFlare**: Solar flare events can occur at any location. 5% chance per arrival; causes market prices to double for that round, creating both risks and opportunities.
+
 ### Game Management
 - **Save/Load Games**: Fully serialize game state including RNG state for deterministic replay
 - **Configurable Setup**: Easy-to-modify game parameters (start cash, cargo capacity, prices)
@@ -88,9 +92,17 @@ Use the same seed to generate identical price sequences across games.
 ### Winning Strategy
 - **Buy Low, Sell High**: Purchase goods at low prices and sell at high prices elsewhere
 - **Market Awareness**: Monitor price trends across different locations
-- **Timing**: Plan your travel and trades to maximize time at profitable locations
+- **Risk Management**: Navigate around pirate-controlled space and watch for solar flares
+- **Timing**: Plan your travel and trades to maximize time at profitable locations, avoiding hazards
 - **Capital Management**: Balance spending on cargo upgrades vs. trading capital
-- **Risk Assessment**: AI players make calculated decisions based on profit potential
+- **Risk Assessment**: AI players make calculated decisions based on profit potential, accounting for event probabilities
+
+### Space Events
+When you arrive at a location, two types of random events can occur:
+
+**Pirate Attacks**: Space pirates may ambush your vessel (10% chance). If attacked, you lose 50% of your cargo immediately. Goods are lost randomly from your inventory.
+
+**Solar Flares**: A solar flare event can disrupt the market (5% chance). When one occurs, all prices at that location double for the round, creating unprecedented profit opportunities but also increased competition. The flare effect applies to all trading in that location for that round only.
 
 ### Game State
 Your save game file includes:
@@ -98,14 +110,14 @@ Your save game file includes:
 - Ship locations and transit status
 - Current market prices
 - Price history (for AI decision making)
-- Random number generator state (ensures reproducibility)
+- Random number generator state (ensures reproducibility) <- but who need this?>
 
 ## Files
 
 - **m365_space_trader.py**: Human multiplayer version
 - **m365_space_trader_ai.py**: Version with AI player support
 - **README.md**: This file
-- **game-*.save**: Save game files (JSON format with encoded RNG state)
+- ***.save**: Save game files (JSON format can easily be edited for **cheating**)
 
 ## Configuration
 
@@ -119,6 +131,9 @@ Edit the configuration sections at the top of each Python file to customize:
 - `CARGO_EXTENSION_COST`: Cost to upgrade cargo hold
 - `CARGO_EXTENSION_AMOUNT`: Units added per upgrade
 - `MAX_CARGO_EXTENSIONS`: Maximum allowed cargo upgrades
+- `PIRATE_ATTACK_PROBABILITY`: Likelihood of pirate attack when arriving (0.0-1.0, default 0.10)
+- `PIRATE_CARGO_LOSS`: Fraction of cargo lost to pirate attack (0.0-1.0, default 0.50)
+- `SUN_FLARE_PROBABILITY`: Likelihood of solar flare at a location (0.0-1.0, default 0.05)
 
 ## Example Gameplay
 
@@ -141,9 +156,9 @@ Edit the configuration sections at the top of each Python file to customize:
 ## Future Enhancements
 
 Possible expansions:
-- Graphical user interface (GUI)
-- Network multiplayer support
-- Market events and disruptions
-- Ship upgrades and special abilities
-- Quest system
-- Player rankings and statistics
+- Graphical user interface (GUI) <- probably **NO**>
+- Network multiplayer support <- probably **NO**>
+- Market events and disruptions <- SpacePirate and SunFlare are already implemented>
+- Ship upgrades and special abilities <- Extension of CargoSpace already implemented, maybe "Refit" function is comming>
+- Quest system <- very nice Idea>
+- Player rankings and statistics <- there are already a ranking>

@@ -21,7 +21,7 @@ import os
 import pickle
 import random
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 
 # ============================================================
@@ -74,6 +74,11 @@ MAX_CARGO_EXTENSIONS: int = 5  # max. Anzahl Erweiterungen
 AI_SELL_MARGIN: float = 0.05  # Verkauf nur, wenn Preis >= Einstand * (1+Margin)
 AI_MIN_EXPECTED_PROFIT: int = 1  # erwarteter Gewinn pro Einheit muss >= sein
 AI_RANDOMNESS: float = 0.10  # kleine Zufallskomponente zur Tie-Break/Varianz
+
+# Events
+PIRATE_ATTACK_PROBABILITY: float = 0.10  # 10% Chance für Piratenüberfall bei Ankunft
+PIRATE_CARGO_LOSS: float = 0.50  # Piraten stehlen 50% der Güter
+SUN_FLARE_PROBABILITY: float = 0.05  # 5% Chance für Sonnensturm bei Ankunft
 
 AI_NAME_POOL = [
     "Nova",
@@ -141,7 +146,7 @@ def _b64_pickle(obj) -> str:
     return base64.b64encode(blob).decode("ascii")
 
 
-def _unb64_pickle(s: str):
+def _unb64_pickle(s: str) -> Any:
     """Deserialize a Python object from a base64-encoded ASCII string.
 
     Reverses the operation performed by _b64_pickle(). Converts a base64-encoded
@@ -196,7 +201,7 @@ class Ship:
     destination: Optional[str] = None
     eta_rounds: int = 0  # verbleibende Runden bis Ankunft
 
-    def start_travel(self, destination: str):
+    def start_travel(self, destination: str) -> None:
         """Initiate travel to a destination.
 
         Sets the ship to in-transit mode with a fixed travel time.
@@ -209,7 +214,7 @@ class Ship:
         self.destination = destination
         self.eta_rounds = TRAVEL_TIME_ROUNDS
 
-    def tick(self):
+    def tick(self) -> None:
         """Advance ship travel by one round.
 
         Decrements the ETA counter. When ETA reaches 0, the ship arrives at its
@@ -242,7 +247,7 @@ class Player:
     # Anzahl durchgeführter Erweiterungen
     cargo_extensions: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Initialize player state after dataclass creation.
 
         Sets up cost basis tracking, cargo capacity based on player type (human/AI),
@@ -293,7 +298,7 @@ class Player:
             return 0.0
         return self.cost_basis.get(good, 0) / float(qty)
 
-    def update_total_wealth(self, prices: Dict[str, Dict[str, int]]):
+    def update_total_wealth(self, prices: Dict[str, Dict[str, int]]) -> None:
         """Recalculate total wealth based on current market prices.
 
         Updates total_wealth to reflect cash + (all cargo items at current location prices).
@@ -346,7 +351,7 @@ class GameState:
         rng.setstate(_unb64_pickle(self.rng_state_b64))
         return rng
 
-    def rng_store(self, rng: random.Random):
+    def rng_store(self, rng: random.Random) -> None:
         """Save the current random number generator state.
 
         Serializes the RNG state for later restoration, ensuring game reproducibility.
@@ -362,7 +367,7 @@ class GameState:
 # ============================================================
 
 
-def ensure_config_valid():
+def ensure_config_valid() -> None:
     """Validate game configuration for consistency.
 
     Checks that all locations have price bounds defined for all goods, and that
@@ -399,7 +404,7 @@ def init_price_stats() -> Dict[str, Dict[str, Dict[str, int]]]:
 
 def update_price_stats(
     stats: Dict[str, Dict[str, Dict[str, int]]], prices: Dict[str, Dict[str, int]]
-):
+) -> None:
     """Record current prices into running statistics.
 
     Adds current prices to the cumulative sum and increments the sample count
@@ -438,11 +443,18 @@ def expected_price(
     return stats[loc][good]["sum"] / float(c)
 
 
+def check_sun_flare(rng: random.Random) -> bool:
+    """Determine if a solar flare event occurs."""
+    return rng.random() < SUN_FLARE_PROBABILITY
+
+
 def generate_prices(rng: random.Random) -> Dict[str, Dict[str, int]]:
     """Generate random prices for all goods at all locations.
 
     Creates new market prices within PRICE_BOUNDS. Called at the start of each
     round to simulate dynamic market conditions. Part of economic simulation.
+
+    If SunFlare occurs, all prices at the affected location are doubled for that round.
 
     Args:
         rng (random.Random): Random number generator for reproducible results.
@@ -453,9 +465,14 @@ def generate_prices(rng: random.Random) -> Dict[str, Dict[str, int]]:
     prices: Dict[str, Dict[str, int]] = {}
     for loc, bounds_for_loc in PRICE_BOUNDS.items():
         prices[loc] = {}
+        faktor: int = 1
+        # check if sun flare occurs at this location
+        if check_sun_flare(rng):
+            faktor = 2  # Preise steigen bei Sonnensturm
+            print(f"⚠️  Sonnensturm in {loc}! Preise verdoppeln sich diese Runde.")
         for good in GOODS:
             mn, mx = bounds_for_loc[good]
-            prices[loc][good] = rng.randint(mn, mx)
+            prices[loc][good] = rng.randint(mn, mx) * faktor
     return prices
 
 
@@ -558,7 +575,7 @@ def jsonable_to_gamestate(d: dict) -> GameState:
     )
 
 
-def save_game(gs: GameState, path: str):
+def save_game(gs: GameState, path: str) -> None:
     """Save game state to a JSON file.
 
     Serializes the complete game state including RNG for later recall. Automatically
@@ -607,7 +624,7 @@ def load_game(path: str) -> GameState:
 # ============================================================
 
 
-def print_header(title: str):
+def print_header(title: str) -> None:
     """Print a formatted section header to the console.
 
     Displays a visually distinct title surrounded by separator lines.
@@ -621,7 +638,7 @@ def print_header(title: str):
     print("=" * 70)
 
 
-def print_market(prices_for_loc: Dict[str, int], loc: str):
+def print_market(prices_for_loc: Dict[str, int], loc: str) -> None:
     """Display current market prices for all goods at a location.
 
     Shows a formatted price list for the player's reference during trading decisions.
@@ -635,7 +652,7 @@ def print_market(prices_for_loc: Dict[str, int], loc: str):
         print(f"  - {g:<12} {prices_for_loc[g]:>4} Credits")
 
 
-def print_player_status(p: Player):
+def print_player_status(p: Player) -> None:
     """Display detailed player information including inventory and ship status.
 
     Shows cash, total wealth, ship location/transit status, cargo capacity and contents
@@ -706,11 +723,13 @@ def choose_from_list(prompt: str, options: List[str]) -> str:
     """
     for i, opt in enumerate(options, start=1):
         print(f"  {i}) {opt}")
-    idx = choose_int(prompt, 1, len(options))
+    idx = choose_int(prompt, 0, len(options))
+    if idx == 0:
+        return "X"  # Abbruchsignal
     return options[idx - 1]
 
 
-def buy_goods(gs: GameState, p: Player):
+def buy_goods(gs: GameState, p: Player) -> None:
     """Interactive trading: prompt player to buy goods at current location.
 
     Allows player to purchase available goods up to cash and cargo limits.
@@ -751,7 +770,7 @@ def buy_goods(gs: GameState, p: Player):
     p.total_wealth = p.cash + sum(p.cargo[g] * gs.prices[loc][g] for g in GOODS)
 
 
-def sell_goods(gs: GameState, p: Player):
+def sell_goods(gs: GameState, p: Player) -> None:
     """Interactive trading: prompt player to sell goods at current location.
 
     Allows player to sell any goods in inventory at current location prices.
@@ -799,7 +818,7 @@ def sell_goods(gs: GameState, p: Player):
     print(f"✅ Verkauft: {qty} x {good} für {revenue} Credits.")
 
 
-def set_course(p: Player):
+def set_course(p: Player) -> None:
     """Interactive travel: prompt player to set destination.
 
     Allows player to choose a destination and initiate 1-round travel.
@@ -823,11 +842,14 @@ def set_course(p: Player):
 
     print("\n🌌 Zielort wählen:")
     dest = choose_from_list("Nummer: ", locations)
+    if dest == "X":
+        print("Abgebrochen.")
+        return
     ship.start_travel(dest)
     print(f"✅ Kurs gesetzt: Flug nach {dest}. Ankunft nächste Runde.")
 
 
-def extend_cargo_capacity(p: Player):
+def extend_cargo_capacity(p: Player) -> None:
     """Interactive upgrade: allow player to purchase cargo hold expansion.
 
     Expands cargo capacity by CARGO_EXTENSION_AMOUNT units. Requires empty cargo
@@ -893,7 +915,7 @@ def extend_cargo_capacity(p: Player):
     print(f"✅ Frachtraum erweitert! Neue Kapazität: {p.cargo_capacity} Einheiten.")
 
 
-def end_turn(gs: GameState):
+def end_turn(gs: GameState) -> None:
     """Advance to the next player's turn.
 
     Increments the current player index, wrapping around to player 0 when reaching
@@ -905,7 +927,67 @@ def end_turn(gs: GameState):
     gs.current_player_idx = (gs.current_player_idx + 1) % len(gs.players)
 
 
-def start_new_round(gs: GameState, rng: random.Random):
+def check_pirate_attack(rng: random.Random) -> bool:
+    """Determine if a pirate attack occurs on an arriving ship.
+
+    Uses random probability to decide if space pirates attack. Called when a ship
+    arrives at its destination. Probability is defined by PIRATE_ATTACK_PROBABILITY.
+
+    Args:
+        rng (random.Random): Random number generator.
+
+    Returns:
+        bool: True if a pirate attack occurs, False otherwise.
+    """
+    return rng.random() < PIRATE_ATTACK_PROBABILITY
+
+
+def apply_pirate_attack(p: Player, rng: random.Random) -> None:
+    """Execute a pirate attack on a player's ship.
+
+    When pirates attack, they steal half of each good in the ship's cargo.
+    The ship still reaches its destination on time (no delay).
+    Updates cargo and cost basis proportionally.
+
+    Args:
+        p (Player): The player being attacked.
+        rng (random.Random): Random number generator (for future variability).
+    """
+    total_stolen_value = 0
+    stolen_goods: Dict[str, int] = {}
+
+    # Berechne Diebstahl pro Gut (50% von jedem Gut)
+    for g in GOODS:
+        qty = p.cargo.get(g, 0)
+        if qty > 0:
+            stolen_qty = int(qty * PIRATE_CARGO_LOSS)
+            if stolen_qty > 0:
+                stolen_goods[g] = stolen_qty
+                # Reduziere Cargo und Kostenbasis
+                avg_cost = p.avg_cost(g)
+                stolen_value = stolen_qty * avg_cost
+                total_stolen_value += stolen_value
+
+                p.cargo[g] = qty - stolen_qty
+                p.cost_basis[g] = max(0, p.cost_basis[g] - int(stolen_value))
+
+    # Display message
+    if stolen_goods:
+        print("\n⚠️  ☠️ PIRATEN-ÜBERFALL! ☠️")
+        print(f"👤 {p.name}s Schiff wurde von Weltraum-Piraten angegriffen!")
+        print("🏴 Die Piraten entkamen mit folgenden Gütern:")
+        for g, qty in stolen_goods.items():
+            print(f"    - {qty} x {g}")
+        print(f"💸 Geschätzter Wert: {int(total_stolen_value)} Credits")
+        print(f"✅ Das Schiff erreicht dennoch pünktlich das Ziel.\n")
+    else:
+        print(f"\n⚠️  ☠️ PIRATEN-ÜBERFALL! ☠️")
+        print(f"👤 {p.name}s Schiff wurde von Weltraum-Piraten angegriffen!")
+        print("🏴 Die Piraten fanden keine Güter zum Stehlen.")
+        print(f"✅ Das Schiff erreicht dennoch pünktlich das Ziel.\n")
+
+
+def start_new_round(gs: GameState, rng: random.Random) -> None:
     """Begin a new game round: process arrivals, regenerate prices, update history.
 
     Executes at round transitions: ships complete travel, new prices are generated,
@@ -921,6 +1003,14 @@ def start_new_round(gs: GameState, rng: random.Random):
     for p in gs.players:
         p.ship.tick()
 
+    # Piraten-Ereignis: mit 10% Chance werden ankommende Schiffe überfallen
+    for p in gs.players:
+        # Event tritt nur auf, wenn Schiff soeben angekommen ist (war in_transit, ist jetzt nicht mehr)
+        # und hat Cargo an Bord
+        if not p.ship.in_transit and p.cargo_used() > 0 and check_pirate_attack(rng):
+            apply_pirate_attack(p, rng)
+            input("Drücke Enter, um fortzufahren...")
+
     # Preise neu berechnen
     gs.prices = generate_prices(rng)
 
@@ -931,7 +1021,7 @@ def start_new_round(gs: GameState, rng: random.Random):
     gs.rng_store(rng)
 
 
-def ranking(gs: GameState):
+def ranking(gs: GameState) -> None:
     """Display current standings with players sorted by total wealth.
 
     Shows a ranked leaderboard with each player's wealth, cash, and cargo status.
@@ -957,7 +1047,7 @@ def ranking(gs: GameState):
 # ============================================================
 
 
-def ai_take_turn(gs: GameState, p: Player, rng: random.Random):
+def ai_take_turn(gs: GameState, p: Player, rng: random.Random) -> None:
     """Execute one turn for an AI player.
 
     Einfacher AI-Zug:
@@ -1094,7 +1184,7 @@ Befehle:
 """
 
 
-def run_game(gs: GameState):
+def run_game(gs: GameState) -> None:
     """Execute the main game loop.
 
     Manages turn-based gameplay: alternating between human and AI player turns,
@@ -1154,29 +1244,29 @@ def run_game(gs: GameState):
             if cmd in ("help", "?"):
                 print(HELP_TEXT)
 
-            elif cmd == "status":
+            elif cmd in ("status", "st"):
                 print_player_status(p)
 
-            elif cmd == "markt":
+            elif cmd in ("markt", "m"):
                 if p.ship.in_transit:
                     print("ℹ️ Du bist unterwegs. Marktpreise siehst du erst am Ziel.")
                 else:
                     loc = p.ship.location
                     print_market(gs.prices[loc], loc)
 
-            elif cmd == "buy":
+            elif cmd in ("buy", "b"):
                 buy_goods(gs, p)
 
-            elif cmd == "sell":
+            elif cmd in ("sell", "s"):
                 sell_goods(gs, p)
 
-            elif cmd == "kurs":
+            elif cmd in ("kurs", "k"):
                 set_course(p)
 
-            elif cmd == "expandieren":
+            elif cmd in ("expandieren", "exp"):
                 extend_cargo_capacity(p)
 
-            elif cmd == "rang":
+            elif cmd in ("rang", "ra"):
                 ranking(gs)
 
             elif cmd == "save":
@@ -1202,11 +1292,11 @@ def run_game(gs: GameState):
                         rng = gs.rng_restore()
                         break  # zurück zum outer loop
 
-            elif cmd in ("quit", "exit"):
+            elif cmd in ("quit", "exit", "q", "x"):  # Spiel beenden
                 print("👋 Spiel beendet.")
                 return
 
-            elif cmd == "ende":
+            elif cmd in ("ende", "e"):  # Zug beenden
                 gs.rng_store(rng)
                 end_turn(gs)
 
@@ -1284,7 +1374,6 @@ def create_new_game_interactive(seed: Optional[int] = None) -> GameState:
         ai_n = max(0, 12 - human_n)
 
     players: List[Player] = []
-    start_loc = list(PRICE_BOUNDS.keys())[0]
 
     # Menschen
     for i in range(human_n):
@@ -1293,6 +1382,7 @@ def create_new_game_interactive(seed: Optional[int] = None) -> GameState:
             or f"Spieler{i+1}"
         )
         cargo = {g: 0 for g in GOODS}
+        start_loc = rng.choice(list(PRICE_BOUNDS.keys()))
         ship = Ship(location=start_loc)
         players.append(
             Player(name=name, cash=START_CASH, cargo=cargo, ship=ship, is_ai=False)
@@ -1302,6 +1392,7 @@ def create_new_game_interactive(seed: Optional[int] = None) -> GameState:
     ai_names = make_unique_ai_names(ai_n, rng)
     for name in ai_names:
         cargo = {g: 0 for g in GOODS}
+        start_loc = rng.choice(list(PRICE_BOUNDS.keys()))
         ship = Ship(location=start_loc)
         players.append(
             Player(name=name, cash=START_CASH, cargo=cargo, ship=ship, is_ai=True)
@@ -1322,7 +1413,7 @@ def create_new_game_interactive(seed: Optional[int] = None) -> GameState:
     return gs
 
 
-def main():
+def main() -> None:
     """Parse command-line arguments and start the game.
 
     Supports --load to resume a saved game or --seed to start deterministic new game.
@@ -1350,7 +1441,7 @@ def main():
     run_game(gs)
 
 
-def clear():
+def clear() -> None:
     """Clear the terminal/console screen.
 
     Executes platform-specific clear command (cls on Windows, clear on Unix/Linux/Mac).
