@@ -64,8 +64,12 @@ PRICE_BOUNDS: Dict[str, Dict[str, Tuple[int, int]]] = {
 
 START_CASH: int = 1_000
 CARGO_CAPACITY: int = 30  # max. Einheiten im Frachtraum (Summe aller Güter)
+AI_CARGO_CAPACITY: int = 50  # AI-Spieler: größerer Frachtraum
 TRAVEL_TIME_ROUNDS: int = 1  # fest 1 Runde gemäß Anforderung
-
+# Cargo-Erweiterung
+CARGO_EXTENSION_COST: int = 500  # Credits pro Erweiterung
+CARGO_EXTENSION_AMOUNT: int = 10  # zusätzliche Einheiten pro Erweiterung
+MAX_CARGO_EXTENSIONS: int = 5  # max. Anzahl Erweiterungen
 # AI-Strategie (einfach, aber solide)
 AI_SELL_MARGIN: float = 0.05  # Verkauf nur, wenn Preis >= Einstand * (1+Margin)
 AI_MIN_EXPECTED_PROFIT: int = 1  # erwarteter Gewinn pro Einheit muss >= sein
@@ -103,29 +107,115 @@ AI_NAME_POOL = [
 
 
 def _b64_pickle(obj) -> str:
+    """Serialize a Python object to a base64-encoded ASCII string.
+
+    Converts any Python object into a compact, safe string representation suitable
+    for JSON serialization. Uses pickle for serialization and base64 encoding to
+    ensure the result is JSON-compatible.
+
+    This is primarily used to preserve the random number generator state in save
+    files. The RNG state is a complex Python object that cannot be directly
+    serialized to JSON, so we pickle it and encode it as base64.
+
+    Args:
+        obj: Any Python object that can be pickled (most standard types are supported).
+             Commonly used with: random.Random().getstate(), dict, list, etc.
+
+    Returns:
+        str: Base64-encoded ASCII string representation of the pickled object.
+             Safe for inclusion in JSON files.
+
+    Example:
+        >>> import random
+        >>> rng = random.Random(42)
+        >>> encoded = _b64_pickle(rng.getstate())
+        >>> isinstance(encoded, str)
+        True
+        >>> len(encoded) > 0
+        True
+
+    See Also:
+        _unb64_pickle: Reverses this operation to recover the original object.
+    """
     blob = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
     return base64.b64encode(blob).decode("ascii")
 
 
 def _unb64_pickle(s: str):
+    """Deserialize a Python object from a base64-encoded ASCII string.
+
+    Reverses the operation performed by _b64_pickle(). Converts a base64-encoded
+    string back into the original Python object using pickle deserialization.
+
+    This function is used to restore the random number generator state from
+    saved game files, ensuring that games can be replayed deterministically
+    with the exact same price sequences.
+
+    Args:
+        s (str): A base64-encoded ASCII string produced by _b64_pickle().
+
+    Returns:
+        Any: The original Python object that was encoded.
+
+    Raises:
+        binascii.Error: If the input string is not valid base64.
+        pickle.UnpicklingError: If the decoded bytes are not valid pickle data.
+
+    Example:
+        >>> import random
+        >>> rng = random.Random(42)
+        >>> state = rng.getstate()
+        >>> encoded = _b64_pickle(state)
+        >>> recovered_state = _unb64_pickle(encoded)
+        >>> state == recovered_state
+        True
+
+    See Also:
+        _b64_pickle: Encodes a Python object to base64 for storage.
+    """
     blob = base64.b64decode(s.encode("ascii"))
     return pickle.loads(blob)
 
 
 @dataclass
 class Ship:
+    """Represents a merchant vessel in space.
+
+    Tracks the ship's current location, transit status, and estimated arrival time.
+    Supports travel between locations with multi-round transit times.
+
+    Attributes:
+        location (str): Current location (e.g., 'Terra', 'Luna', 'Mars', 'Jovian Station').
+        in_transit (bool): Whether the ship is currently traveling. Defaults to False.
+        destination (Optional[str]): Target location when in transit. None if stationary.
+        eta_rounds (int): Rounds remaining until arrival. 0 if not in transit.
+    """
+
     location: str
     in_transit: bool = False
     destination: Optional[str] = None
     eta_rounds: int = 0  # verbleibende Runden bis Ankunft
 
     def start_travel(self, destination: str):
+        """Initiate travel to a destination.
+
+        Sets the ship to in-transit mode with a fixed travel time.
+        The ship will arrive at the destination at the start of the next round.
+
+        Args:
+            destination (str): Name of the destination location.
+        """
         self.in_transit = True
         self.destination = destination
         self.eta_rounds = TRAVEL_TIME_ROUNDS
 
     def tick(self):
-        """Runden-Tick: reduziert ETA, setzt bei 0 auf angekommen."""
+        """Advance ship travel by one round.
+
+        Decrements the ETA counter. When ETA reaches 0, the ship arrives at its
+        destination and transitions to stationary mode. Called at the start of
+        each new game round.
+        """
         if not self.in_transit:
             return
         self.eta_rounds -= 1
@@ -147,8 +237,17 @@ class Player:
     cost_basis: Dict[str, int] = None  # type: ignore
     # gesamter Reichtum = cash + (Summe aller Güter * aktuelle Preise) -> für AI-Entscheidungen relevant
     total_wealth: int = 0
+    # Personalisierte Frachtraumkapazität (kann erweitert werden)
+    cargo_capacity: int = 0
+    # Anzahl durchgeführter Erweiterungen
+    cargo_extensions: int = 0
 
     def __post_init__(self):
+        """Initialize player state after dataclass creation.
+
+        Sets up cost basis tracking, cargo capacity based on player type (human/AI),
+        and initial total wealth. Called automatically after dataclass instantiation.
+        """
         self.total_wealth = (
             self.cash
         )  # initial nur Cash, wird in AI-Entscheidungen aktualisiert
@@ -157,20 +256,52 @@ class Player:
         else:
             for g in GOODS:
                 self.cost_basis.setdefault(g, 0)
+        # Setze initiale Kapazität basierend auf AI-Status
+        if self.cargo_capacity == 0:
+            self.cargo_capacity = AI_CARGO_CAPACITY if self.is_ai else CARGO_CAPACITY
 
     def cargo_used(self) -> int:
+        """Calculate cargo units currently in use.
+
+        Returns:
+            int: Sum of all goods in cargo inventory.
+        """
         return sum(self.cargo.values())
 
     def cargo_free(self) -> int:
-        return CARGO_CAPACITY - self.cargo_used()
+        """Calculate available cargo space.
+
+        Returns:
+            int: Remaining capacity (cargo_capacity - cargo_used()).
+        """
+        return self.cargo_capacity - self.cargo_used()
 
     def avg_cost(self, good: str) -> float:
+        """Calculate average purchase price per unit of a good.
+
+        Computes the average cost basis for goods currently held. Useful for
+        determining profit/loss on sales.
+
+        Args:
+            good (str): Name of the commodity.
+
+        Returns:
+            float: Average price paid per unit, or 0.0 if not held.
+        """
         qty = self.cargo.get(good, 0)
         if qty <= 0:
             return 0.0
         return self.cost_basis.get(good, 0) / float(qty)
 
     def update_total_wealth(self, prices: Dict[str, Dict[str, int]]):
+        """Recalculate total wealth based on current market prices.
+
+        Updates total_wealth to reflect cash + (all cargo items at current location prices).
+        Must be called after prices change or cargo is modified.
+
+        Args:
+            prices (Dict[str, Dict[str, int]]): Current market prices by location and good.
+        """
         loc = self.ship.location
         self.total_wealth = self.cash + sum(
             self.cargo[g] * prices[loc][g] for g in GOODS
@@ -179,6 +310,20 @@ class Player:
 
 @dataclass
 class GameState:
+    """Represents the complete state of a game session.
+
+    Manages all game data including round number, player information, market prices,
+    trading history, and random number generator state for deterministic replay.
+
+    Attributes:
+        round_no (int): Current game round number (1-indexed).
+        current_player_idx (int): Index of the current player in the players list.
+        players (List[Player]): All players in the game (human and AI).
+        prices (Dict[str, Dict[str, int]]): Current market prices (location -> good -> price).
+        rng_state_b64 (str): Serialized random state for reproducible games.
+        price_stats (Dict): Historical price statistics for AI decision-making.
+    """
+
     round_no: int
     current_player_idx: int
     players: List[Player]
@@ -190,11 +335,25 @@ class GameState:
     ]  # loc -> good -> {"sum":..,"count":..}
 
     def rng_restore(self) -> random.Random:
+        """Restore the random number generator to a previous state.
+
+        Deserializes the encoded RNG state to enable deterministic replay of games.
+
+        Returns:
+            random.Random: A restored random.Random object with the saved state.
+        """
         rng = random.Random()
         rng.setstate(_unb64_pickle(self.rng_state_b64))
         return rng
 
     def rng_store(self, rng: random.Random):
+        """Save the current random number generator state.
+
+        Serializes the RNG state for later restoration, ensuring game reproducibility.
+
+        Args:
+            rng (random.Random): The random number generator to save.
+        """
         self.rng_state_b64 = _b64_pickle(rng.getstate())
 
 
@@ -204,6 +363,14 @@ class GameState:
 
 
 def ensure_config_valid():
+    """Validate game configuration for consistency.
+
+    Checks that all locations have price bounds defined for all goods, and that
+    min prices are not greater than max prices. Raises ValueError if validation fails.
+
+    Raises:
+        ValueError: If price bounds are missing or invalid.
+    """
     for loc, bounds in PRICE_BOUNDS.items():
         for g in GOODS:
             if g not in bounds:
@@ -214,6 +381,14 @@ def ensure_config_valid():
 
 
 def init_price_stats() -> Dict[str, Dict[str, Dict[str, int]]]:
+    """Initialize empty price statistics tracking.
+
+    Creates a data structure to track running sum and count of prices for each
+    location and good, enabling AI players to estimate long-term price expectations.
+
+    Returns:
+        Dict: Nested dictionary with structure {location: {good: {sum: 0, count: 0}}}
+    """
     stats: Dict[str, Dict[str, Dict[str, int]]] = {}
     for loc in PRICE_BOUNDS.keys():
         stats[loc] = {}
@@ -225,6 +400,15 @@ def init_price_stats() -> Dict[str, Dict[str, Dict[str, int]]]:
 def update_price_stats(
     stats: Dict[str, Dict[str, Dict[str, int]]], prices: Dict[str, Dict[str, int]]
 ):
+    """Record current prices into running statistics.
+
+    Adds current prices to the cumulative sum and increments the sample count
+    for each location and good. Used to compute historical price averages.
+
+    Args:
+        stats: Price statistics tracking structure.
+        prices: Current market prices to record.
+    """
     for loc in prices:
         for g in prices[loc]:
             stats[loc][g]["sum"] += int(prices[loc][g])
@@ -234,6 +418,20 @@ def update_price_stats(
 def expected_price(
     stats: Dict[str, Dict[str, Dict[str, int]]], loc: str, good: str, fallback: int
 ) -> float:
+    """Estimate expected price based on historical average.
+
+    Computes the mean price for a good at a location across all previous rounds.
+    Used by AI players to make trading decisions based on historical trends.
+
+    Args:
+        stats: Historical price statistics.
+        loc (str): Location name.
+        good (str): Good name.
+        fallback (int): Default price if no history exists.
+
+    Returns:
+        float: Average historical price, or fallback if no data available.
+    """
     c = stats[loc][good]["count"]
     if c <= 0:
         return float(fallback)
@@ -241,7 +439,17 @@ def expected_price(
 
 
 def generate_prices(rng: random.Random) -> Dict[str, Dict[str, int]]:
-    """Erzeugt neue Preise je Ort/Gut innerhalb Min/Max."""
+    """Generate random prices for all goods at all locations.
+
+    Creates new market prices within PRICE_BOUNDS. Called at the start of each
+    round to simulate dynamic market conditions. Part of economic simulation.
+
+    Args:
+        rng (random.Random): Random number generator for reproducible results.
+
+    Returns:
+        Dict: Market prices with structure {location: {good: price}}.
+    """
     prices: Dict[str, Dict[str, int]] = {}
     for loc, bounds_for_loc in PRICE_BOUNDS.items():
         prices[loc] = {}
@@ -257,6 +465,17 @@ def generate_prices(rng: random.Random) -> Dict[str, Dict[str, int]]:
 
 
 def gamestate_to_jsonable(gs: GameState) -> dict:
+    """Convert game state to JSON-serializable dictionary.
+
+    Transforms GameState into a flat dictionary suitable for JSON serialization,
+    including player data, prices, RNG state, and configuration metadata.
+
+    Args:
+        gs (GameState): The game state to serialize.
+
+    Returns:
+        dict: JSON-compatible dictionary representation of game state.
+    """
     return {
         "round_no": gs.round_no,
         "current_player_idx": gs.current_player_idx,
@@ -272,12 +491,15 @@ def gamestate_to_jsonable(gs: GameState) -> dict:
                 "is_ai": p.is_ai,
                 "cost_basis": p.cost_basis,
                 "total_wealth": p.total_wealth,
+                "cargo_capacity": p.cargo_capacity,
+                "cargo_extensions": p.cargo_extensions,
             }
             for p in gs.players
         ],
         "meta": {
             "START_CASH": START_CASH,
             "CARGO_CAPACITY": CARGO_CAPACITY,
+            "AI_CARGO_CAPACITY": AI_CARGO_CAPACITY,
             "TRAVEL_TIME_ROUNDS": TRAVEL_TIME_ROUNDS,
             "GOODS": GOODS,
             "LOCATIONS": list(PRICE_BOUNDS.keys()),
@@ -286,6 +508,17 @@ def gamestate_to_jsonable(gs: GameState) -> dict:
 
 
 def jsonable_to_gamestate(d: dict) -> GameState:
+    """Reconstruct game state from JSON dictionary.
+
+    Parses a JSON dictionary back into a GameState object, rebuilding all player,
+    ship, and game data structures from their serialized form.
+
+    Args:
+        d (dict): Dictionary produced by gamestate_to_jsonable().
+
+    Returns:
+        GameState: Reconstructed game state ready to resume.
+    """
     players: List[Player] = []
     for pd in d["players"]:
         shipd = pd["ship"]
@@ -297,6 +530,8 @@ def jsonable_to_gamestate(d: dict) -> GameState:
         )
         cargo = {g: int(pd["cargo"].get(g, 0)) for g in GOODS}
         cost_basis = {g: int(pd.get("cost_basis", {}).get(g, 0)) for g in GOODS}
+        cargo_capacity = int(pd.get("cargo_capacity", 0))
+        cargo_extensions = int(pd.get("cargo_extensions", 0))
         players.append(
             Player(
                 name=pd["name"],
@@ -306,6 +541,8 @@ def jsonable_to_gamestate(d: dict) -> GameState:
                 is_ai=bool(pd.get("is_ai", False)),
                 cost_basis=cost_basis,
                 total_wealth=int(pd.get("total_wealth", 0)),
+                cargo_capacity=cargo_capacity,
+                cargo_extensions=cargo_extensions,
             )
         )
 
@@ -322,6 +559,15 @@ def jsonable_to_gamestate(d: dict) -> GameState:
 
 
 def save_game(gs: GameState, path: str):
+    """Save game state to a JSON file.
+
+    Serializes the complete game state including RNG for later recall. Automatically
+    adds .save extension if not provided. Reproducible replay guaranteed by saved RNG.
+
+    Args:
+        gs (GameState): The game state to save.
+        path (str): File path (with or without .save extension).
+    """
     # Sicherstellen, dass Dateiendung .save hat (optional)
     if not path.lower().endswith(".save"):
         path += ".save"
@@ -331,6 +577,21 @@ def save_game(gs: GameState, path: str):
 
 
 def load_game(path: str) -> GameState:
+    """Load game state from a saved JSON file.
+
+    Deserializes a save file back into a complete GameState with all player data,
+    market state, and RNG, allowing seamless game resumption.
+
+    Args:
+        path (str): Path to save file (with or without .save extension).
+
+    Returns:
+        GameState: The loaded game state ready to resume.
+
+    Raises:
+        FileNotFoundError: If the save file doesn't exist.
+        json.JSONDecodeError: If the file is not valid JSON.
+    """
     # Sicherstellen, dass Dateiendung .save hat (optional)
     if not path.lower().endswith(".save"):
         path += ".save"
@@ -347,18 +608,42 @@ def load_game(path: str) -> GameState:
 
 
 def print_header(title: str):
+    """Print a formatted section header to the console.
+
+    Displays a visually distinct title surrounded by separator lines.
+    Used to mark major game sections and status updates.
+
+    Args:
+        title (str): The header text to display.
+    """
     print("\n" + "=" * 70)
     print(title)
     print("=" * 70)
 
 
 def print_market(prices_for_loc: Dict[str, int], loc: str):
+    """Display current market prices for all goods at a location.
+
+    Shows a formatted price list for the player's reference during trading decisions.
+
+    Args:
+        prices_for_loc (Dict[str, int]): Good names to prices at this location.
+        loc (str): Location name to display.
+    """
     print(f"\n📍 Marktpreise in {loc}:")
     for g in GOODS:
         print(f"  - {g:<12} {prices_for_loc[g]:>4} Credits")
 
 
 def print_player_status(p: Player):
+    """Display detailed player information including inventory and ship status.
+
+    Shows cash, total wealth, ship location/transit status, cargo capacity and contents
+    with average cost per item. Used to inform player decisions.
+
+    Args:
+        p (Player): The player to display information for.
+    """
     ship = p.ship
     tag = "🤖 AI" if p.is_ai else "👤 Mensch"
     if ship.in_transit:
@@ -369,7 +654,9 @@ def print_player_status(p: Player):
     print(f"💰 Cash: {p.cash:,} Credits")
     print(f"💰 Gesamter Reichtum: {p.total_wealth:,} Credits")
     print(ship_str)
-    print(f"📦 Frachtraum: {p.cargo_used()}/{CARGO_CAPACITY} (frei: {p.cargo_free()})")
+    print(
+        f"📦 Frachtraum: {p.cargo_used()}/{p.cargo_capacity} (frei: {p.cargo_free()})"
+    )
     if p.cargo_used() == 0:
         print("   (leer)")
     else:
@@ -381,6 +668,18 @@ def print_player_status(p: Player):
 
 
 def choose_int(prompt: str, min_v: int, max_v: int) -> int:
+    """Prompt user for integer input within a valid range.
+
+    Repeatedly asks for input until a valid integer within [min_v, max_v] is received.
+
+    Args:
+        prompt (str): The question to display.
+        min_v (int): Minimum valid value (inclusive).
+        max_v (int): Maximum valid value (inclusive).
+
+    Returns:
+        int: The validated user input.
+    """
     while True:
         s = input(prompt).strip()
         try:
@@ -393,6 +692,18 @@ def choose_int(prompt: str, min_v: int, max_v: int) -> int:
 
 
 def choose_from_list(prompt: str, options: List[str]) -> str:
+    """Present a numbered menu and get user selection.
+
+    Displays options numbered 1-N and prompts for selection by number.
+    Re-prompts on invalid input.
+
+    Args:
+        prompt (str): Question to display before the list.
+        options (List[str]): List of options to present.
+
+    Returns:
+        str: The selected option from the list.
+    """
     for i, opt in enumerate(options, start=1):
         print(f"  {i}) {opt}")
     idx = choose_int(prompt, 1, len(options))
@@ -400,6 +711,15 @@ def choose_from_list(prompt: str, options: List[str]) -> str:
 
 
 def buy_goods(gs: GameState, p: Player):
+    """Interactive trading: prompt player to buy goods at current location.
+
+    Allows player to purchase available goods up to cash and cargo limits.
+    Updates player inventory, cash, and cost basis. Prevents buying while in transit.
+
+    Args:
+        gs (GameState): The game state (for prices and validation).
+        p (Player): The player making the purchase.
+    """
     if p.ship.in_transit:
         print("⛔ Kaufen nicht möglich: Dein Schiff ist gerade unterwegs.")
         return
@@ -432,6 +752,15 @@ def buy_goods(gs: GameState, p: Player):
 
 
 def sell_goods(gs: GameState, p: Player):
+    """Interactive trading: prompt player to sell goods at current location.
+
+    Allows player to sell any goods in inventory at current location prices.
+    Updates cash and reduces cost basis. Prevents selling while in transit.
+
+    Args:
+        gs (GameState): The game state (for prices).
+        p (Player): The player making the sale.
+    """
     if p.ship.in_transit:
         print("⛔ Verkaufen nicht möglich: Dein Schiff ist gerade unterwegs.")
         return
@@ -471,6 +800,14 @@ def sell_goods(gs: GameState, p: Player):
 
 
 def set_course(p: Player):
+    """Interactive travel: prompt player to set destination.
+
+    Allows player to choose a destination and initiate 1-round travel.
+    Prevents travel if already in transit.
+
+    Args:
+        p (Player): The player setting course.
+    """
     ship = p.ship
     if ship.in_transit:
         print(
@@ -490,12 +827,94 @@ def set_course(p: Player):
     print(f"✅ Kurs gesetzt: Flug nach {dest}. Ankunft nächste Runde.")
 
 
+def extend_cargo_capacity(p: Player):
+    """Interactive upgrade: allow player to purchase cargo hold expansion.
+
+    Expands cargo capacity by CARGO_EXTENSION_AMOUNT units. Requires empty cargo
+    and stationary ship. Cost increases with each upgrade (linear scaling).
+    Displays confirmation dialog with cost breakdown.
+
+    Args:
+        p (Player): The player upgrading their cargo hold.
+    """
+    ship = p.ship
+
+    # jede Erweiterung ist teurer als die vorherige (lineare Steigerung)
+    extension_cost = CARGO_EXTENSION_COST + (p.cargo_extensions * CARGO_EXTENSION_COST)
+
+    # Bedingungen prüfen
+    if ship.in_transit:
+        print(
+            "⛔ Frachtraumerweiterung nicht möglich: Dein Schiff ist gerade unterwegs."
+        )
+        return
+
+    if p.cargo_used() > 0:
+        print("⛔ Frachtraumerweiterung nicht möglich: Dein Frachtraum muss leer sein.")
+        return
+
+    if p.cargo_extensions >= MAX_CARGO_EXTENSIONS:
+        max_cap = (AI_CARGO_CAPACITY if p.is_ai else CARGO_CAPACITY) + (
+            MAX_CARGO_EXTENSIONS * CARGO_EXTENSION_AMOUNT
+        )
+        print(
+            f"⛔ Maximale Frachtraumerweiterungen erreicht ({p.cargo_capacity}/{max_cap} Einheiten)."
+        )
+        return
+
+    if p.cash < extension_cost:
+        print(
+            f"⛔ Nicht genug Geld! Erweiterung kostet {extension_cost} Credits, du hast aber nur {p.cash}."
+        )
+        return
+
+    # Bestätigung
+    print(f"\n🔧 Frachtraumerweiterung")
+    print(f"   Aktuelle Kapazität: {p.cargo_capacity} Einheiten")
+    print(
+        f"   Neue Kapazität:     {p.cargo_capacity + CARGO_EXTENSION_AMOUNT} Einheiten"
+    )
+    print(f"   Kosten:             {extension_cost} Credits")
+    print(f"   Dein Cash nach:     {p.cash - extension_cost} Credits")
+
+    confirm = input("\n✓ Bestätigen? (ja/nein): ").strip().lower()
+    if confirm not in ("ja", "j", "yes", "y"):
+        print("Abgebrochen.")
+        return
+
+    # Durchführung
+    p.cash -= extension_cost
+    p.cargo_capacity += CARGO_EXTENSION_AMOUNT
+    p.cargo_extensions += 1
+    # Schiff auf in Transit setzen, damit Erweiterung erst in der nächsten Runde wirksam wird
+    p.ship.in_transit = True
+    p.ship.destination = p.ship.location  # bleibt am selben Ort, aber in Transit
+
+    print(f"✅ Frachtraum erweitert! Neue Kapazität: {p.cargo_capacity} Einheiten.")
+
+
 def end_turn(gs: GameState):
+    """Advance to the next player's turn.
+
+    Increments the current player index, wrapping around to player 0 when reaching
+    the end of the player list.
+
+    Args:
+        gs (GameState): The game state to update.
+    """
     gs.current_player_idx = (gs.current_player_idx + 1) % len(gs.players)
 
 
 def start_new_round(gs: GameState, rng: random.Random):
-    """Neue Runde: Ankünfte, neue Preise, History-Update."""
+    """Begin a new game round: process arrivals, regenerate prices, update history.
+
+    Executes at round transitions: ships complete travel, new prices are generated,
+    price history is updated, and RNG state is saved. Increment round counter.
+
+    Args:
+        gs (GameState): The game state to advance.
+        rng (random.Random): The random number generator for price generation.
+    """
     gs.round_no += 1
 
     # Schiffe ticken (Ankünfte zu Beginn der Runde)
@@ -513,6 +932,14 @@ def start_new_round(gs: GameState, rng: random.Random):
 
 
 def ranking(gs: GameState):
+    """Display current standings with players sorted by total wealth.
+
+    Shows a ranked leaderboard with each player's wealth, cash, and cargo status.
+    Updates wealth values based on current market prices. Used for game progress display.
+
+    Args:
+        gs (GameState): The game state to display rankings from.
+    """
     # Reichtum für alle Spieler aktualisieren (für AI-Entscheidungen und Anzeige)
     for p in gs.players:
         p.update_total_wealth(gs.prices)
@@ -521,7 +948,7 @@ def ranking(gs: GameState):
     for i, p in enumerate(rows, start=1):
         tag = "🤖" if p.is_ai else "👤"
         print(
-            f"{i:>2}. {tag} {p.name:<18} Reichtum: {p.total_wealth:>9,} | Cash: {p.cash:>9,} | Cargo: {p.cargo_used():>2}/{CARGO_CAPACITY}"
+            f"{i:>2}. {tag} {p.name:<18} Reichtum: {p.total_wealth:>9,} | Cash: {p.cash:>9,} | Cargo: {p.cargo_used():>2}/{p.cargo_capacity}"
         )
 
 
@@ -531,10 +958,21 @@ def ranking(gs: GameState):
 
 
 def ai_take_turn(gs: GameState, p: Player, rng: random.Random):
-    """Einfacher AI-Zug:
+    """Execute one turn for an AI player.
+
+    Einfacher AI-Zug:
     1) Wenn unterwegs: nichts tun
     2) Wenn angekommen: profitable Güter am Standort verkaufen
     3) Beste erwartete Arbitrage suchen (History-basierte Erwartung am Ziel), kaufen, fliegen
+
+    AI strategy: (1) Sell profitable goods at current location. (2) Identify best
+    expected arbitrage using historical price data and profit margins. (3) Buy goods
+    and travel to destination, or wait/explore if no clear opportunity.
+
+    Args:
+        gs (GameState): The game state (prices, stats).
+        p (Player): The AI player taking a turn.
+        rng (random.Random): Random number generator for decision randomness.
     """
     print_header(f"🤖 AI-Zug: {p.name}")
 
@@ -646,6 +1084,7 @@ Befehle:
   buy           - Güter kaufen
   sell          - Güter verkaufen
   kurs          - Kurs setzen / losfliegen (Ankunft nächste Runde)
+  expandieren   - Frachtraum erweitern (Schiff muss leer + nicht unterwegs sein)
   ende          - Zug beenden
   save <datei>  - Spiel speichern (z.B. save savegame.json)
   load <datei>  - Spiel laden
@@ -656,6 +1095,15 @@ Befehle:
 
 
 def run_game(gs: GameState):
+    """Execute the main game loop.
+
+    Manages turn-based gameplay: alternating between human and AI player turns,
+    processing commands, updating game state, and handling round transitions.
+    Continues until player quits. Supports save/load mid-game.
+
+    Args:
+        gs (GameState): The initialized game state to run.
+    """
     rng = gs.rng_restore()
     ensure_config_valid()
 
@@ -725,6 +1173,9 @@ def run_game(gs: GameState):
             elif cmd == "kurs":
                 set_course(p)
 
+            elif cmd == "expandieren":
+                extend_cargo_capacity(p)
+
             elif cmd == "rang":
                 ranking(gs)
 
@@ -778,6 +1229,18 @@ def run_game(gs: GameState):
 
 
 def make_unique_ai_names(count: int, rng: random.Random) -> List[str]:
+    """Generate unique AI player names from name pool.
+
+    Randomly selects and returns unique AI names from AI_NAME_POOL. If more names
+    needed than available in pool, appends numeric suffixes to avoid duplicates.
+
+    Args:
+        count (int): Number of AI names to generate.
+        rng (random.Random): Random number generator for shuffling.
+
+    Returns:
+        List[str]: List of unique AI player names.
+    """
     pool = AI_NAME_POOL[:]
     rng.shuffle(pool)
     names: List[str] = []
@@ -794,6 +1257,18 @@ def make_unique_ai_names(count: int, rng: random.Random) -> List[str]:
 
 
 def create_new_game_interactive(seed: Optional[int] = None) -> GameState:
+    """Initialize a new game with interactive setup.
+
+    Prompts user for number of human and AI players, collects human player names,
+    generates AI names, initializes all players at start location with starting capital,
+    and seeds RNG for reproducible gameplay.
+
+    Args:
+        seed (Optional[int]): Random seed for reproducible games. Auto-generated if None.
+
+    Returns:
+        GameState: A freshly initialized game state ready to play.
+    """
     if seed is None:
         seed = random.randint(1, 10_000_000)
     rng = random.Random(seed)
@@ -848,6 +1323,16 @@ def create_new_game_interactive(seed: Optional[int] = None) -> GameState:
 
 
 def main():
+    """Parse command-line arguments and start the game.
+
+    Supports --load to resume a saved game or --seed to start deterministic new game.
+    If neither provided, begins interactive new game setup.
+
+    Command-line Usage:
+        python script.py                          # Interactive new game
+        python script.py --load game.save         # Resume from save
+        python script.py --seed 12345             # New game with seed
+    """
     parser = argparse.ArgumentParser(
         description="Weltraum-Handelssimulation (Terminal)"
     )
@@ -866,6 +1351,11 @@ def main():
 
 
 def clear():
+    """Clear the terminal/console screen.
+
+    Executes platform-specific clear command (cls on Windows, clear on Unix/Linux/Mac).
+    Used to provide clean display at game startup.
+    """
     os.system("cls" if os.name == "nt" else "clear")
 
 
