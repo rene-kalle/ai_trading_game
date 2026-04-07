@@ -7,7 +7,7 @@ Weltraum-Handelssimulation (Terminal, rundenbasiert)
 - Mehrere Orte, mehrere Güter
 - Kaufen/Verkaufen an aktuellen Marktpreisen
 - Jede Runde: Preise pro Ort & Gut neu (innerhalb Min/Max je Ort & Gut)
-- Reisen dauert exakt 1 Runde (Ankunft zu Beginn der nächsten Runde)
+- Reisen dauert unterschiedlich lange (1-4 Runden) je nach Ziel
 - Spielstand speichern/laden (JSON) inkl. RNG-State
 - AI-Spieler: einfache Handelsstrategie (History-basierte Erwartung)
 """
@@ -65,7 +65,21 @@ PRICE_BOUNDS: Dict[str, Dict[str, Tuple[int, int]]] = {
 START_CASH: int = 1_000
 CARGO_CAPACITY: int = 30  # max. Einheiten im Frachtraum (Summe aller Güter)
 AI_CARGO_CAPACITY: int = 50  # AI-Spieler: größerer Frachtraum
-TRAVEL_TIME_ROUNDS: int = 1  # fest 1 Runde gemäß Anforderung
+# Travel durations (in rounds) between location pairs
+TRAVEL_DURATIONS: Dict[Tuple[str, str], int] = {
+    ("Terra", "Luna"): 1,
+    ("Luna", "Terra"): 1,
+    ("Terra", "Mars"): 3,
+    ("Mars", "Terra"): 3,
+    ("Terra", "Jovian Station"): 4,
+    ("Jovian Station", "Terra"): 4,
+    ("Luna", "Mars"): 2,
+    ("Mars", "Luna"): 2,
+    ("Luna", "Jovian Station"): 3,
+    ("Jovian Station", "Luna"): 3,
+    ("Mars", "Jovian Station"): 2,
+    ("Jovian Station", "Mars"): 2,
+}
 # Cargo-Erweiterung
 CARGO_EXTENSION_COST: int = 500  # Credits pro Erweiterung
 CARGO_EXTENSION_AMOUNT: int = 10  # zusätzliche Einheiten pro Erweiterung
@@ -201,18 +215,28 @@ class Ship:
     destination: Optional[str] = None
     eta_rounds: int = 0  # verbleibende Runden bis Ankunft
 
-    def start_travel(self, destination: str) -> None:
+    def start_travel(self, destination: str, current_location: str) -> None:
         """Initiate travel to a destination.
 
-        Sets the ship to in-transit mode with a fixed travel time.
-        The ship will arrive at the destination at the start of the next round.
+        Sets the ship to in-transit mode with variable travel time based on the
+        distance between current location and destination. Travel time is determined
+        by the TRAVEL_DURATIONS configuration.
 
         Args:
             destination (str): Name of the destination location.
+            current_location (str): Current location (starting point for travel).
+
+        Raises:
+            ValueError: If travel route is not in TRAVEL_DURATIONS configuration.
         """
+        route = (current_location, destination)
+        if route not in TRAVEL_DURATIONS:
+            raise ValueError(f"Unknown travel route: {route}")
+
+        travel_time = TRAVEL_DURATIONS[route]
         self.in_transit = True
         self.destination = destination
-        self.eta_rounds = TRAVEL_TIME_ROUNDS
+        self.eta_rounds = travel_time
 
     def tick(self) -> None:
         """Advance ship travel by one round.
@@ -445,7 +469,11 @@ def expected_price(
 
 def check_sun_flare(rng: random.Random) -> bool:
     """Determine if a solar flare event occurs."""
-    return rng.random() < SUN_FLARE_PROBABILITY
+    result: bool = rng.random() < SUN_FLARE_PROBABILITY
+    print(
+        f"🔍 Sonnensturm Check: {'JA' if result else 'NEIN'} (Wahrscheinlichkeit: {SUN_FLARE_PROBABILITY*100:.1f}%)"
+    )
+    return result
 
 
 def generate_prices(rng: random.Random) -> Dict[str, Dict[str, int]]:
@@ -517,7 +545,6 @@ def gamestate_to_jsonable(gs: GameState) -> dict:
             "START_CASH": START_CASH,
             "CARGO_CAPACITY": CARGO_CAPACITY,
             "AI_CARGO_CAPACITY": AI_CARGO_CAPACITY,
-            "TRAVEL_TIME_ROUNDS": TRAVEL_TIME_ROUNDS,
             "GOODS": GOODS,
             "LOCATIONS": list(PRICE_BOUNDS.keys()),
         },
@@ -845,8 +872,9 @@ def set_course(p: Player) -> None:
     if dest == "X":
         print("Abgebrochen.")
         return
-    ship.start_travel(dest)
-    print(f"✅ Kurs gesetzt: Flug nach {dest}. Ankunft nächste Runde.")
+    travel_time = TRAVEL_DURATIONS[(ship.location, dest)]
+    ship.start_travel(dest, ship.location)
+    print(f"✅ Kurs gesetzt: Flug nach {dest}. ETA: {travel_time} Runde(n).")
 
 
 def extend_cargo_capacity(p: Player) -> None:
@@ -939,14 +967,19 @@ def check_pirate_attack(rng: random.Random) -> bool:
     Returns:
         bool: True if a pirate attack occurs, False otherwise.
     """
-    return rng.random() < PIRATE_ATTACK_PROBABILITY
+    result: bool = rng.random() < PIRATE_ATTACK_PROBABILITY
+    print(
+        f"🔍 Piratenüberfall Check: {'JA' if result else 'NEIN'} (Wahrscheinlichkeit: {PIRATE_ATTACK_PROBABILITY*100:.1f}%)"
+    )
+
+    return result
 
 
 def apply_pirate_attack(p: Player, rng: random.Random) -> None:
     """Execute a pirate attack on a player's ship.
 
     When pirates attack, they steal half of each good in the ship's cargo.
-    The ship still reaches its destination on time (no delay).
+    The ship still reaches its destination later (1 round delay).
     Updates cargo and cost basis proportionally.
 
     Args:
@@ -955,6 +988,9 @@ def apply_pirate_attack(p: Player, rng: random.Random) -> None:
     """
     total_stolen_value = 0
     stolen_goods: Dict[str, int] = {}
+
+    # Schiff braucht 1 Runde länger, um Ziel zu erreichen (Piratenüberfall verzögert Ankunft)
+    p.ship.eta_rounds += 1
 
     # Berechne Diebstahl pro Gut (50% von jedem Gut)
     for g in GOODS:
@@ -979,12 +1015,12 @@ def apply_pirate_attack(p: Player, rng: random.Random) -> None:
         for g, qty in stolen_goods.items():
             print(f"    - {qty} x {g}")
         print(f"💸 Geschätzter Wert: {int(total_stolen_value)} Credits")
-        print(f"✅ Das Schiff erreicht dennoch pünktlich das Ziel.\n")
+        print(f"✅ Das Schiff erreicht das Ziel in {p.ship.eta_rounds} Runden.\n")
     else:
         print(f"\n⚠️  ☠️ PIRATEN-ÜBERFALL! ☠️")
         print(f"👤 {p.name}s Schiff wurde von Weltraum-Piraten angegriffen!")
         print("🏴 Die Piraten fanden keine Güter zum Stehlen.")
-        print(f"✅ Das Schiff erreicht dennoch pünktlich das Ziel.\n")
+        print(f"✅ Das Schiff erreicht das Ziel in {p.ship.eta_rounds} Runden.\n")
 
 
 def start_new_round(gs: GameState, rng: random.Random) -> None:
@@ -999,17 +1035,16 @@ def start_new_round(gs: GameState, rng: random.Random) -> None:
     """
     gs.round_no += 1
 
+    # Piraten-Ereignis: mit 10% Chance werden ankommende Schiffe überfallen
+    for p in gs.players:
+        # Event tritt nur auf, wenn Schiff unterwegs ist
+        if p.ship.in_transit and check_pirate_attack(rng):
+            apply_pirate_attack(p, rng)
+            input("Drücke Enter, um fortzufahren...")
+
     # Schiffe ticken (Ankünfte zu Beginn der Runde)
     for p in gs.players:
         p.ship.tick()
-
-    # Piraten-Ereignis: mit 10% Chance werden ankommende Schiffe überfallen
-    for p in gs.players:
-        # Event tritt nur auf, wenn Schiff soeben angekommen ist (war in_transit, ist jetzt nicht mehr)
-        # und hat Cargo an Bord
-        if not p.ship.in_transit and p.cargo_used() > 0 and check_pirate_attack(rng):
-            apply_pirate_attack(p, rng)
-            input("Drücke Enter, um fortzufahren...")
 
     # Preise neu berechnen
     gs.prices = generate_prices(rng)
@@ -1127,9 +1162,10 @@ def ai_take_turn(gs: GameState, p: Player, rng: random.Random) -> None:
         if rng.random() < 0.40:
             choices = [l for l in PRICE_BOUNDS.keys() if l != loc]
             dest = rng.choice(choices)
-            p.ship.start_travel(dest)
+            travel_time = TRAVEL_DURATIONS[(loc, dest)]
+            p.ship.start_travel(dest, loc)
             print(
-                f"🤖 {p.name} findet keinen klaren Deal und fliegt auf Verdacht nach {dest}."
+                f"🤖 {p.name} findet keinen klaren Deal und fliegt auf Verdacht nach {dest} (ETA: {travel_time} Runde(n))."
             )
         else:
             print(f"🤖 {p.name} findet keinen klaren Deal und bleibt in {loc}.")
@@ -1142,9 +1178,10 @@ def ai_take_turn(gs: GameState, p: Player, rng: random.Random) -> None:
 
     if qty <= 0:
         # nichts kaufbar -> evtl. trotzdem reisen
-        p.ship.start_travel(dest)
+        travel_time = TRAVEL_DURATIONS[(loc, dest)]
+        p.ship.start_travel(dest, loc)
         print(
-            f"🤖 {p.name} will {good} handeln, hat aber kein Budget/Frachtraum. Fliegt trotzdem nach {dest}."
+            f"🤖 {p.name} will {good} handeln, hat aber kein Budget/Frachtraum. Fliegt trotzdem nach {dest} (ETA: {travel_time} Runde(n))."
         )
         return
 
@@ -1159,8 +1196,9 @@ def ai_take_turn(gs: GameState, p: Player, rng: random.Random) -> None:
     )
 
     # Reisen
-    p.ship.start_travel(dest)
-    print(f"🤖 {p.name} setzt Kurs nach {dest}. Ankunft nächste Runde.")
+    travel_time = TRAVEL_DURATIONS[(loc, dest)]
+    p.ship.start_travel(dest, loc)
+    print(f"🤖 {p.name} setzt Kurs nach {dest}. ETA: {travel_time} Runde(n).")
 
 
 # ============================================================
@@ -1181,6 +1219,9 @@ Befehle:
   rang          - Zwischenstand / Ranking
   help          - Hilfe anzeigen
   quit          - Spiel beenden (ohne automatisch zu speichern)
+  ----------
+  pirat 50 - 50% Chance, dass ankommende Schiffe überfallen werden, normal sind 10 
+  sonne 50 - 50% Chance, dass ein Sonnensturm auftritt, normal sind 5
 """
 
 
@@ -1308,6 +1349,33 @@ def run_game(gs: GameState) -> None:
                     ranking(gs)
 
                 break
+
+            # geheime Befehle für Tests / Debugging
+            elif cmd == "pirat":
+                global PIRATE_ATTACK_PROBABILITY
+                if len(parts) == 2:
+                    try:
+                        val = float(parts[1])
+                        PIRATE_ATTACK_PROBABILITY = val / 100.0
+                        print(
+                            f"⚠️ Piraten-Angriffs-Wahrscheinlichkeit auf {val}% gesetzt."
+                        )
+                    except ValueError:
+                        print("⛔ Ungültiger Wert. Nutzung: pirat <Prozent>")
+                else:
+                    print("⛔ Nutzung: pirat <Prozent>")
+
+            elif cmd == "sonne":
+                global SUN_FLARE_PROBABILITY
+                if len(parts) == 2:
+                    try:
+                        val = float(parts[1])
+                        SUN_FLARE_PROBABILITY = val / 100.0
+                        print(f"⚠️ Sonnenstrahl-Wahrscheinlichkeit auf {val}% gesetzt.")
+                    except ValueError:
+                        print("⛔ Ungültiger Wert. Nutzung: sonne <Prozent>")
+                else:
+                    print("⛔ Nutzung: sonne <Prozent>")
 
             else:
                 print("Unbekannter Befehl. Tipp: 'help' eingeben.")
